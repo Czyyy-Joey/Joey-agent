@@ -1,0 +1,11 @@
+{
+  "loop": true,
+  "steps": [
+    {
+      "text": "This answer streams slowly so that you can press Stop. ",
+      "chunk": 3,
+      "delay": "40ms",
+      "hang": true
+    }
+  ]
+}

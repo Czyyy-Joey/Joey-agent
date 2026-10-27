@@ -1,0 +1,37 @@
+# Joey-agent 配置。复制为 joey.toml 后按需调整。
+# 此处不存储密钥：api_key_env / auth_token_env 指定保存它们的
+# 环境变量名。
+
+[provider]
+base_url        = "https://oneapi-comate.baidu-int.com/v1"   # 可通过 ONEAPI_BASE_URL 覆盖
+api_key_env     = "ONEAPI_API_KEY"
+max_retries     = 3
+timeout_seconds = 300
+
+[model]
+# 下列能力参数于 2026-10-26 针对 gpt-6.1-sol 实测得出
+# （参见 testdata/probe/ 和 docs/PLAN.md）。其他模型可能有所不同。
+name                = "gpt-6.1-sol"            # 可通过 JOEY_MODEL 覆盖
+context_window      = 32000                    # 保守取值；网关并未公布该值
+streaming           = true
+stream_usage        = false                    # 不发送 stream_options；usage 仍会返回
+tools               = "native"                 # native | none
+parallel_tool_calls = true                     # 受支持；阶段 1 仍按顺序执行调用
+max_tokens_param    = "max_completion_tokens"  # max_tokens 会被拒绝并返回 HTTP 503
+max_output_tokens   = 0                        # 0 = 由模型自行决定
+
+[agent]
+max_steps = 30
+
+[server]
+addr            = "127.0.0.1:8080"   # 绑定到非回环地址需要 JOEY_AUTH_TOKEN
+allowed_origins = []
+auth_token_env  = "JOEY_AUTH_TOKEN"
+
+[workspace]
+# 每个会话创建时选择自己的工作目录，文件工具只能访问该会话的目录。
+root          = "."                  # 新会话的默认目录；可通过 JOEY_WORKSPACE 或 -workspace 覆盖
+allowed_roots = ["~"]                # 会话可选择的目录树（root 总是允许的）；可通过 JOEY_ALLOWED_ROOTS 覆盖
+
+[store]
+path = "~/.joey/joey.db"             # SQLite 数据库；":memory:" 表示不持久化。可通过 JOEY_DB 或 -db 覆盖

@@ -1,0 +1,9 @@
+data: {"id":"chatcmpl-5e7e3900fe0d41c0947c8b0f62c2c","object":"chat.completion.chunk","created":1793011192,"model":"gpt-6.1-sol","system_fingerprint":"fp_db5846b043","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}],"service_tier":"default"}
+
+data: {"id":"chatcmpl-5e7e3900fe0d41c0947c8b0f62c2c","object":"chat.completion.chunk","created":1793011192,"model":"gpt-6.1-sol","system_fingerprint":"fp_db5846b043","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_tZSfanBDi4J9KsmplbsSfSYD","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"README.md\"}"}}]},"finish_reason":null}],"service_tier":"default"}
+
+data: {"id":"chatcmpl-5e7e3900fe0d41c0947c8b0f62c2c","object":"chat.completion.chunk","created":1793011192,"model":"gpt-6.1-sol","system_fingerprint":"fp_db5846b043","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"service_tier":"default"}
+
+data: {"id":"chatcmpl-5e7e3900fe0d41c0947c8b0f62c2c","object":"chat.completion.chunk","created":1793011192,"model":"gpt-6.1-sol","system_fingerprint":"fp_db5846b043","choices":[],"usage":{"prompt_tokens":247,"completion_tokens":19,"total_tokens":266},"service_tier":"default"}
+
+data: [DONE]

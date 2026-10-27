@@ -1,0 +1,21 @@
+{
+  "loop": true,
+  "steps": [
+    {
+      "text": "Let me look at the workspace first.",
+      "chunk": 6,
+      "delay": "15ms",
+      "calls": [
+        {"id": "call_demo_1", "name": "list_directory", "arguments": {"path": "."}},
+        {"id": "call_demo_2", "name": "read_file", "arguments": {"path": "README.md"}}
+      ],
+      "usage": {"input_tokens": 250, "output_tokens": 40, "total_tokens": 290}
+    },
+    {
+      "text": "This workspace is the **Joey-agent** project. I listed the root directory and read `README.md`, whose title is `# Joey-agent`.",
+      "chunk": 5,
+      "delay": "15ms",
+      "usage": {"input_tokens": 420, "output_tokens": 35, "total_tokens": 455}
+    }
+  ]
+}

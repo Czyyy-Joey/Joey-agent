@@ -1,0 +1,16 @@
+{
+  "steps": [
+    {"text": "先看看目录和 README。", "calls": [
+      {"id": "call_l1", "name": "list_directory", "arguments": {"path": "."}},
+      {"id": "call_l2", "name": "read_file", "arguments": {"path": "README.md"}}
+    ]},
+    {"text": "这个项目叫 Alpha。"},
+    {"text": "这是一个很慢的任务，", "chunk": 2, "delay": "20ms", "hang": true},
+    {"text": "好的，继续完成了。"},
+    {"text": "读另一个目录的 README。", "calls": [
+      {"id": "call_l3", "name": "read_file", "arguments": {"path": "README.md"}}
+    ]},
+    {"text": "这个项目叫 Beta。"},
+    {"text": "进程将在这里被杀掉，", "chunk": 2, "delay": "20ms", "hang": true}
+  ]
+}

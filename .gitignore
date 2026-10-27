@@ -1,0 +1,29 @@
+# 构建输出
+/joey
+web/dist/
+web/*.tsbuildinfo
+
+# 依赖
+web/node_modules/
+
+# 本地配置 / 密钥
+/joey.toml
+.env
+.env.*
+
+# 本地文档和测试脚本
+/docs/
+/scripts/
+# scripts/probe-oneapi.sh 抓取的原始网关记录
+/testdata/probe/
+
+# 测试 / 覆盖率产物
+*.out
+*.test
+coverage.*
+
+# 编辑器 / 操作系统
+.DS_Store
+.idea/
+.vscode/
+*.swp

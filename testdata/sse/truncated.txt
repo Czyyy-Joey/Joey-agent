@@ -1,0 +1,2 @@
+data: {"choices":[{"index":0,"delta":{"role":"assistant","content":"Partial ans"},"finish_reason":null}]}
+
