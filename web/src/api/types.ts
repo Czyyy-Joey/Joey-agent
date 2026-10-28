@@ -1,6 +1,13 @@
 // 与 internal/protocol 保持一致，两者需同步修改。
 
-export type ItemKind = 'user_message' | 'agent_message' | 'reasoning' | 'tool_call' | 'tool_output' | 'turn_aborted'
+export type ItemKind =
+  | 'user_message'
+  | 'agent_message'
+  | 'reasoning'
+  | 'tool_call'
+  | 'tool_output'
+  | 'turn_aborted'
+  | 'compaction'
 export type ItemStatus = 'in_progress' | 'completed' | 'failed' | 'aborted' | 'interrupted'
 export type TurnStatus = 'running' | 'completed' | 'interrupted' | 'failed' | 'max_steps'
 
@@ -20,6 +27,19 @@ export interface ToolOutput {
   call_id: string
   content: string
   is_error?: boolean
+  diff?: string
+}
+
+export type CompactionReason = 'pre_turn' | 'mid_turn' | 'post_turn' | 'overflow' | 'manual'
+
+export interface Compaction {
+  reason: CompactionReason
+  /** 采用的是后台提前生成的摘要。 */
+  background?: boolean
+  items_before: number
+  items_after: number
+  tokens_before: number
+  tokens_after: number
 }
 
 export interface Item {
@@ -29,6 +49,7 @@ export interface Item {
   text?: string
   call?: ToolCall
   output?: ToolOutput
+  compaction?: Compaction
 }
 
 export interface ItemData {
@@ -41,6 +62,8 @@ export interface ItemData {
   output?: string
   is_error?: boolean
   duration_ms?: number
+  diff?: string
+  compaction?: Compaction
 }
 
 export interface TurnData {
@@ -55,10 +78,32 @@ export interface UsageData {
   last: Usage
   turn: Usage
   context_window?: number
+  /** 下一次请求的上下文大小（上游用量 + 新条目估算）。 */
+  context_tokens?: number
+  estimated?: boolean
+  auto_compact_limit?: number
 }
 
 export interface MessageData {
   message: string
+}
+
+export type ReviewDecision = 'approved' | 'approved_for_session' | 'denied' | 'abort' | 'timed_out' | 'cancelled'
+/** 用户可以主动给出的决定。 */
+export type UserDecision = Extract<ReviewDecision, 'approved' | 'approved_for_session' | 'denied' | 'abort'>
+
+export interface ApprovalData {
+  approval_id: string
+  call_id: string
+  tool: string
+  kind: 'exec' | 'patch'
+  command?: string
+  cwd?: string
+  paths?: string[]
+  patch?: string
+  reason?: string
+  unsandboxed?: boolean
+  decision?: ReviewDecision
 }
 
 interface Envelope<T extends string, D> {
@@ -77,6 +122,7 @@ export type AgentEvent =
   | Envelope<'item.started' | 'item.delta' | 'item.completed', ItemData>
   | Envelope<'token.usage', UsageData>
   | Envelope<'warning' | 'error', MessageData>
+  | Envelope<'approval.requested' | 'approval.resolved', ApprovalData>
 
 export interface SessionSummary {
   id: string

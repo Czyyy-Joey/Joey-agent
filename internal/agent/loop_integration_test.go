@@ -25,7 +25,7 @@ func TestLoopWithRealTools(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	router, err := tools.NewRouter(builtin.Tools(ws)...)
+	router, err := tools.NewRouter(builtin.ReadOnlyTools(ws)...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,7 +56,7 @@ func TestLoopWithRealTools(t *testing.T) {
 	if o := outputs["c2"]; o == nil || !strings.Contains(o.Content, "# Joey-agent") || o.IsError {
 		t.Errorf("read_file output = %+v", o)
 	}
-	if o := outputs["c3"]; o == nil || !o.IsError || !strings.Contains(o.Content, "outside the workspace") {
+	if o := outputs["c3"]; o == nil || !o.IsError || !strings.Contains(o.Content, "outside the allowed directories") {
 		t.Errorf("escape attempt output = %+v", o)
 	}
 }

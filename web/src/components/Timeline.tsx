@@ -1,7 +1,9 @@
 import { useEffect, useRef } from 'react'
 import { AlertTriangle, Brain, ChevronRight, CircleSlash, XCircle } from 'lucide-react'
+import type { UserDecision } from '@/api/types'
 import type { Entry } from '@/state/reducer'
 import { AgentMessage } from './AgentMessage'
+import { CompactionCard } from './CompactionCard'
 import { ToolCallCard } from './ToolCallCard'
 
 const turnEndText: Record<string, string> = {
@@ -10,7 +12,9 @@ const turnEndText: Record<string, string> = {
   max_steps: '已达到最大步数，任务未完成',
 }
 
-function EntryView({ entry }: { entry: Entry }) {
+type Decide = (approvalId: string, d: UserDecision) => Promise<void>
+
+function EntryView({ entry, onDecide }: { entry: Entry; onDecide: Decide }) {
   switch (entry.type) {
     case 'user':
       return (
@@ -34,7 +38,9 @@ function EntryView({ entry }: { entry: Entry }) {
         </details>
       )
     case 'tool':
-      return <ToolCallCard entry={entry} />
+      return <ToolCallCard entry={entry} onDecide={onDecide} />
+    case 'compaction':
+      return <CompactionCard entry={entry} />
     case 'notice':
       return (
         <div
@@ -59,7 +65,7 @@ function EntryView({ entry }: { entry: Entry }) {
   }
 }
 
-export function Timeline({ entries }: { entries: Entry[] }) {
+export function Timeline({ entries, onDecide }: { entries: Entry[]; onDecide: Decide }) {
   const endRef = useRef<HTMLDivElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const stick = useRef(true)
@@ -82,10 +88,10 @@ export function Timeline({ entries }: { entries: Entry[] }) {
         {entries.length === 0 ? (
           <div className="mt-24 text-center text-muted">
             <p className="text-base font-medium text-foreground">Joey Agent</p>
-            <p className="mt-1">试试：「列出当前目录，然后读取 README.md 并总结」</p>
+            <p className="mt-1">试试：「找出项目里所有的 TODO，然后运行测试」</p>
           </div>
         ) : (
-          entries.map((e) => <EntryView key={e.id} entry={e} />)
+          entries.map((e) => <EntryView key={e.id} entry={e} onDecide={onDecide} />)
         )}
         <div ref={endRef} />
       </div>

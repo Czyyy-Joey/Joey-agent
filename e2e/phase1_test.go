@@ -176,9 +176,10 @@ func TestPhase1ReadReadme(t *testing.T) {
 		"item.completed/user_message//completed",
 		"item.started/agent_message//in_progress",
 		"item.completed/agent_message//completed",
+		// 两个只读工具并行执行（Phase 5），完成事件按调用顺序发出。
 		"item.started/tool_call/list_directory/in_progress",
-		"item.completed/tool_call/list_directory/completed",
 		"item.started/tool_call/read_file/in_progress",
+		"item.completed/tool_call/list_directory/completed",
 		"item.completed/tool_call/read_file/completed",
 		"item.started/agent_message//in_progress",
 		"item.completed/agent_message//completed",

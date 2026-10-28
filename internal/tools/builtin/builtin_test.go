@@ -63,8 +63,8 @@ func TestReadFile(t *testing.T) {
 		{name: "not found", args: `{"path":"nope.md"}`, modelErr: "does not exist"},
 		{name: "directory", args: `{"path":"docs"}`, modelErr: "is a directory"},
 		{name: "binary", args: `{"path":"bin.dat"}`, modelErr: "binary"},
-		{name: "dotdot escape", args: `{"path":"../secret.txt"}`, modelErr: "outside the workspace"},
-		{name: "absolute escape", args: `{"path":"` + secret + `"}`, modelErr: "outside the workspace"},
+		{name: "dotdot escape", args: `{"path":"../secret.txt"}`, modelErr: "outside the allowed directories"},
+		{name: "absolute escape", args: `{"path":"` + secret + `"}`, modelErr: "outside the allowed directories"},
 		{name: "symlink escape", args: `{"path":"escape.txt"}`, modelErr: "resolves outside"},
 		{name: "symlinked dir escape", args: `{"path":"parent/secret.txt"}`, modelErr: "resolves outside"},
 	}

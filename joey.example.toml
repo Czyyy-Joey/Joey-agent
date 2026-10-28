@@ -1,9 +1,11 @@
 # Joey-agent 配置。复制为 joey.toml 后按需调整。
-# 此处不存储密钥：api_key_env / auth_token_env 指定保存它们的
-# 环境变量名。
+# API 密钥可以写在 api_key 里，也可以放在 api_key_env 指定的环境变量中（环境变量优先）。
+# 写在文件里时，joey 会把这个文件加入 deny_read，文件工具和命令都读不到它。
+# auth_token_env 指定保存 API 令牌的环境变量名。
 
 [provider]
 base_url        = "https://oneapi-comate.baidu-int.com/v1"   # 可通过 ONEAPI_BASE_URL 覆盖
+# api_key       = "sk-..."
 api_key_env     = "ONEAPI_API_KEY"
 max_retries     = 3
 timeout_seconds = 300
@@ -12,16 +14,23 @@ timeout_seconds = 300
 # 下列能力参数于 2026-10-26 针对 gpt-6.1-sol 实测得出
 # （参见 testdata/probe/ 和 docs/PLAN.md）。其他模型可能有所不同。
 name                = "gpt-6.1-sol"            # 可通过 JOEY_MODEL 覆盖
-context_window      = 32000                    # 保守取值；网关并未公布该值
+context_window      = 900000                   # 2026-10-28 实测：90 万 token 的输入被接受，100 万被拒绝；可通过 JOEY_CONTEXT_WINDOW 覆盖
 streaming           = true
 stream_usage        = false                    # 不发送 stream_options；usage 仍会返回
 tools               = "native"                 # native | none
-parallel_tool_calls = true                     # 受支持；阶段 1 仍按顺序执行调用
+parallel_tool_calls = true                     # 受支持；连续的只读调用会并行执行
 max_tokens_param    = "max_completion_tokens"  # max_tokens 会被拒绝并返回 HTTP 503
 max_output_tokens   = 0                        # 0 = 由模型自行决定
+# 上下文管理（Phase 3）
+auto_compact_token_limit   = 200000            # 上下文超过它就自动压缩；取它和窗口 90% 中较小的一个，0 = 只用窗口的 90%
+tool_output_tokens         = 10000             # 单个工具输出写入历史时保留的 token 数（首尾各一半），不超过压缩阈值的 1/4
+post_turn_compact_percent  = 80                # 一轮结束时上下文达到压缩阈值的 80% 就先压缩，下一轮不用等；0 = 关闭
+background_compact_percent = 60                # 上下文达到压缩阈值的 60% 后在后台提前生成摘要，需要压缩时直接用；0 = 关闭
 
 [agent]
-max_steps = 30
+max_steps                = 30
+project_docs             = true   # 把项目根到工作目录沿途的 AGENTS.md / JOEY.md 加进系统提示词
+approval_timeout_seconds = 600    # 等待审批的时长，超时按拒绝处理
 
 [server]
 addr            = "127.0.0.1:8080"   # 绑定到非回环地址需要 JOEY_AUTH_TOKEN
@@ -35,3 +44,16 @@ allowed_roots = ["~"]                # 会话可选择的目录树（root 总是
 
 [store]
 path = "~/.joey/joey.db"             # SQLite 数据库；":memory:" 表示不持久化。可通过 JOEY_DB 或 -db 覆盖
+
+[sandbox]
+# 命令执行的隔离层（Phase 4），只支持 macOS：命令在 Seatbelt（/usr/bin/sandbox-exec）中执行，
+# 由内核拦截越权的读、写和网络访问，与 Codex 的 macOS 沙箱相同。
+# 可通过 JOEY_SANDBOX_MODE / JOEY_APPROVAL 覆盖。
+mode               = "workspace-write"     # read-only | workspace-write | danger-full-access（不套沙箱）
+network            = false                 # false 时命令不能联网，包括本机端口和 unix socket
+writable_roots     = []                    # 工作区之外额外可写的目录，支持 "~"；$TMPDIR 和 /tmp 总是可写
+read_only_subpaths = [".git", ".joey"]     # 每个可写根下仍然只读的子路径
+deny_read          = ["~/.ssh", "~/.gnupg", "~/.aws", "~/.netrc"]   # 命令和文件工具都不能读写；其余位置命令都能读
+approval           = "on-request"          # untrusted | on-request | never
+allow              = []                    # 命令前缀，直接执行，例如 ["go test", "make"]
+deny               = []                    # 命令前缀，一律拒绝，例如 ["git push"]

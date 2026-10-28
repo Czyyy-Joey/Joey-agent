@@ -1,0 +1,39 @@
+{
+  "loop": true,
+  "steps": [
+    {
+      "text": "我先找一下项目里的 TODO，并读取 main.go。",
+      "chunk": 6,
+      "delay": "15ms",
+      "calls": [
+        {"id": "call_todo", "name": "search_files", "arguments": {"pattern": "TODO"}},
+        {"id": "call_read", "name": "read_file", "arguments": {"path": "main.go"}}
+      ],
+      "usage": {"input_tokens": 900, "output_tokens": 60, "total_tokens": 960}
+    },
+    {
+      "text": "找到两处 TODO。现在把端口改成 9090。",
+      "chunk": 6,
+      "delay": "15ms",
+      "calls": [
+        {"id": "call_patch", "name": "apply_patch", "arguments": {"patch": "*** Begin Patch\n*** Update File: main.go\n@@ func main() {\n-\tport := 8080\n+\tport := 9090\n*** End Patch"}}
+      ],
+      "usage": {"input_tokens": 1300, "output_tokens": 70, "total_tokens": 1370}
+    },
+    {
+      "text": "修改完成，运行 go build 检查。",
+      "chunk": 6,
+      "delay": "15ms",
+      "calls": [
+        {"id": "call_build", "name": "exec_command", "arguments": {"command": "go build -o /dev/null . && go vet . && echo BUILD OK", "timeout_ms": 120000}}
+      ],
+      "usage": {"input_tokens": 1500, "output_tokens": 40, "total_tokens": 1540}
+    },
+    {
+      "text": "完成：\n\n- TODO：`main.go:8`（端口从 flag 读取）、`util.go:3`（补测试）\n- `main.go` 的端口已从 8080 改成 **9090**\n- `go build` 和 `go vet` 都通过",
+      "chunk": 5,
+      "delay": "15ms",
+      "usage": {"input_tokens": 1700, "output_tokens": 80, "total_tokens": 1780}
+    }
+  ]
+}

@@ -53,6 +53,7 @@ export default function App() {
         setSidebarOpen(false)
         void s.selectSession(id)
       }}
+      onDelete={s.deleteSession}
       onNew={() => {
         setSidebarOpen(false)
         void s.pickAndCreate().then((r) => {
@@ -88,7 +89,7 @@ export default function App() {
           )}
         </header>
 
-        <Timeline entries={s.entries} />
+        <Timeline entries={s.entries} onDecide={s.resolveApproval} />
 
         <footer className="shrink-0 border-t border-border bg-background">
           <div className="mx-auto flex max-w-[760px] flex-col gap-2 px-4 py-3">

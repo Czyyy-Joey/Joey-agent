@@ -2,88 +2,56 @@ package builtin
 
 import (
 	"errors"
-	"io/fs"
-	"os"
-	"path/filepath"
-	"strings"
 
+	"github.com/Czyyy-Joey/joey-agent/internal/sandbox"
 	"github.com/Czyyy-Joey/joey-agent/internal/tools"
 )
 
-// Workspace 把文件工具限制在一棵目录树内。
-//
-// 这是 Phase 1 的最小路径防护；Phase 4 会把它移入 sandbox 包。
-// 它会在检查包含关系之前解析符号链接，但文件仍可能在
-// 检查与实际使用之间被替换。
+// Workspace 是文件工具使用的路径守卫，它把 sandbox.Guard 的拒绝转换成
+// 回传给模型的工具错误。所有文件类工具都必须经过它。
 type Workspace struct {
-	root string
+	g *sandbox.Guard
 }
 
-// NewWorkspace 把 root 解析为绝对路径且不含符号链接的目录。
+// NewWorkspace 返回只能读取 root 的守卫。
 func NewWorkspace(root string) (*Workspace, error) {
-	abs, err := filepath.Abs(root)
+	p, err := sandbox.NewPolicy(sandbox.ReadOnly, root, sandbox.PolicyOptions{})
 	if err != nil {
 		return nil, err
 	}
-	resolved, err := filepath.EvalSymlinks(abs)
-	if err != nil {
-		return nil, err
-	}
-	info, err := os.Stat(resolved)
-	if err != nil {
-		return nil, err
-	}
-	if !info.IsDir() {
-		return nil, errors.New("workspace is not a directory: " + root)
-	}
-	return &Workspace{root: resolved}, nil
+	return &Workspace{g: sandbox.NewGuard(p)}, nil
 }
+
+// WorkspaceFromGuard 返回执行 g 的策略的守卫。
+func WorkspaceFromGuard(g *sandbox.Guard) *Workspace { return &Workspace{g: g} }
 
 // Root 返回解析后的工作区目录。
-func (w *Workspace) Root() string { return w.root }
+func (w *Workspace) Root() string { return w.g.Root() }
 
-// Resolve 把模型提供的路径映射为工作区内一个已存在的绝对路径。
-// 相对路径相对于根目录；"" 表示根目录。
+// Resolve 把模型提供的路径映射为允许读取的绝对路径。
 func (w *Workspace) Resolve(p string) (string, error) {
-	if strings.ContainsRune(p, 0) {
-		return "", tools.Errorf("invalid path")
-	}
-	if p == "" {
-		p = "."
-	}
-	if !filepath.IsAbs(p) {
-		p = filepath.Join(w.root, p)
-	}
-	p = filepath.Clean(p)
-	if !w.contains(p) {
-		return "", tools.Errorf("path %q is outside the workspace %s", p, w.root)
-	}
-	resolved, err := filepath.EvalSymlinks(p)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return "", tools.Errorf("path %q does not exist", w.Rel(p))
-		}
-		return "", tools.Errorf("cannot access %q: %v", w.Rel(p), err)
-	}
-	if !w.contains(resolved) {
-		return "", tools.Errorf("path %q resolves outside the workspace", w.Rel(p))
-	}
-	return resolved, nil
+	return w.resolve(p, sandbox.Read)
 }
 
-// Rel 返回 p 相对于根目录的路径以便展示；如果 p 在根目录之外，则返回 p 本身。
-func (w *Workspace) Rel(p string) string {
-	rel, err := filepath.Rel(w.root, p)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return p
-	}
-	return rel
+// ResolveWrite 把模型提供的路径映射为允许写入的绝对路径（目标可以不存在）。
+func (w *Workspace) ResolveWrite(p string) (string, error) {
+	return w.resolve(p, sandbox.Write)
 }
 
-func (w *Workspace) contains(p string) bool {
-	rel, err := filepath.Rel(w.root, p)
-	if err != nil {
-		return false
+func (w *Workspace) resolve(p string, a sandbox.Access) (string, error) {
+	r, err := w.g.Resolve(p, a)
+	var pe *sandbox.PathError
+	if errors.As(err, &pe) {
+		return "", tools.Errorf("%s", pe.Error())
 	}
-	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
+	return r, err
 }
+
+// Rel 返回 p 相对于工作区的路径以便展示；在工作区之外则返回 p 本身。
+func (w *Workspace) Rel(p string) string { return w.g.Rel(p) }
+
+// Policy 返回守卫执行的沙箱策略。
+func (w *Workspace) Policy() sandbox.Policy { return w.g.Policy() }
+
+// Denied 报告绝对路径 p 是否在 deny_read 中。
+func (w *Workspace) Denied(p string) bool { return w.g.Denied(p) }

@@ -238,3 +238,31 @@ func TestConcurrentAppends(t *testing.T) {
 		}
 	}
 }
+
+func TestDeleteSession(t *testing.T) {
+	db, _ := openTemp(t)
+	t0 := time.Date(2026, 10, 28, 8, 0, 0, 0, time.UTC)
+	for _, id := range []string{"gone", "kept"} {
+		newSession(t, db, id, t0)
+		mustDo(t, db.StartTurn(ctx, TurnRecord{ID: "t-" + id, SessionID: id, Status: protocol.TurnCompleted, Input: "x", StartSeq: 1, StartedAt: t0}))
+		mustDo(t, db.AppendItem(ctx, id, protocol.Item{ID: "i-" + id, Kind: protocol.ItemUserMessage, Text: "hi"}))
+		mustDo(t, db.AppendEvent(ctx, protocol.Event{Seq: 1, SessionID: id, Type: protocol.EventTurnStarted, TS: t0}))
+	}
+	mustDo(t, db.DeleteSession(ctx, "gone"))
+	if _, err := db.GetSession(ctx, "gone"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("get after delete = %v", err)
+	}
+	items, _ := db.LoadItems(ctx, "gone")
+	turns, _ := db.ListTurns(ctx, "gone")
+	seq, _ := db.LastEventSeq(ctx, "gone")
+	if len(items) != 0 || len(turns) != 0 || seq != 0 {
+		t.Errorf("leftovers: items %d, turns %d, last seq %d", len(items), len(turns), seq)
+	}
+	items, _ = db.LoadItems(ctx, "kept")
+	if seq, _ := db.LastEventSeq(ctx, "kept"); len(items) != 1 || seq != 1 {
+		t.Errorf("other session was touched: items %d, last seq %d", len(items), seq)
+	}
+	if err := db.DeleteSession(ctx, "gone"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("second delete = %v", err)
+	}
+}

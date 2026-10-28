@@ -68,8 +68,8 @@ func ExtractRequestID(message string) string {
 }
 
 // IsContextOverflow 报告 err 是否表示 prompt 超出了上下文窗口。
-// 尚未观察到这种情况下的 OneAPI 错误形态，因此这里
-// 匹配 OpenAI 常见的措辞。
+// OneAPI + gpt-6.1-sol 实测（2026-10-28）返回 HTTP 400："Your input exceeds
+// the context window of this model."；另外匹配 OpenAI 常见的错误码和措辞。
 func IsContextOverflow(err error) bool {
 	var apiErr *APIError
 	if !errors.As(err, &apiErr) {
@@ -79,5 +79,10 @@ func IsContextOverflow(err error) bool {
 		return true
 	}
 	msg := strings.ToLower(apiErr.Message)
-	return strings.Contains(msg, "context length") || strings.Contains(msg, "maximum context")
+	for _, s := range []string{"context window", "context length", "maximum context"} {
+		if strings.Contains(msg, s) {
+			return true
+		}
+	}
+	return false
 }

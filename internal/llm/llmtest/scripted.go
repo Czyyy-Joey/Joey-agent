@@ -26,9 +26,12 @@ type Step struct {
 	// 每个 delta 之前都会等待 Delay，并且会响应取消。
 	Delay Duration `json:"delay,omitempty"`
 	// Hang 会在流式发送文本后阻塞，直到 context 被取消。
-	Hang  bool            `json:"hang,omitempty"`
-	Error string          `json:"error,omitempty"`
-	Usage *protocol.Usage `json:"usage,omitempty"`
+	Hang  bool   `json:"hang,omitempty"`
+	Error string `json:"error,omitempty"`
+	// ErrorStatus 不为 0 时，Error 以这个 HTTP 状态的 *llm.APIError 返回，
+	// 用来模拟网关错误（例如 400 上下文超限）。
+	ErrorStatus int             `json:"error_status,omitempty"`
+	Usage       *protocol.Usage `json:"usage,omitempty"`
 }
 
 // StepCall 是一条脚本化的工具调用。
@@ -162,7 +165,11 @@ func (s *Scripted) Stream(ctx context.Context, req llm.Request) iter.Seq2[llm.St
 			return
 		}
 		if step.Error != "" {
-			yield(llm.StreamEvent{}, errors.New(step.Error))
+			var err error = errors.New(step.Error)
+			if step.ErrorStatus != 0 {
+				err = &llm.APIError{StatusCode: step.ErrorStatus, Message: step.Error}
+			}
+			yield(llm.StreamEvent{}, err)
 			return
 		}
 		for i, c := range step.Calls {

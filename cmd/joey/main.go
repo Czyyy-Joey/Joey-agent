@@ -16,11 +16,15 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Czyyy-Joey/joey-agent/internal/agent"
 	"github.com/Czyyy-Joey/joey-agent/internal/config"
 	"github.com/Czyyy-Joey/joey-agent/internal/dialog"
+	"github.com/Czyyy-Joey/joey-agent/internal/history"
 	"github.com/Czyyy-Joey/joey-agent/internal/llm"
 	"github.com/Czyyy-Joey/joey-agent/internal/llm/llmtest"
 	"github.com/Czyyy-Joey/joey-agent/internal/llm/openaicompat"
+	"github.com/Czyyy-Joey/joey-agent/internal/prompt"
+	"github.com/Czyyy-Joey/joey-agent/internal/sandbox"
 	"github.com/Czyyy-Joey/joey-agent/internal/server"
 	"github.com/Czyyy-Joey/joey-agent/internal/session"
 	"github.com/Czyyy-Joey/joey-agent/internal/store"
@@ -32,6 +36,8 @@ import (
 const usage = `Usage:
   joey serve [flags]           run the HTTP API and web UI
   joey chat  [flags] [prompt]  chat in the terminal (reads stdin lines when no prompt)
+  joey sandbox exec [flags] -- <command>   run a shell command in the configured sandbox
+  joey sandbox info [flags]                show the sandbox policy and the generated Seatbelt profile
 
 Run "joey <command> -h" for flags.
 `
@@ -47,12 +53,18 @@ func main() {
 		err = runServe(os.Args[2:])
 	case "chat":
 		err = runChat(os.Args[2:])
+	case "sandbox":
+		err = runSandbox(os.Args[2:])
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 		return
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n\n%s", os.Args[1], usage)
 		os.Exit(2)
+	}
+	var code exitCode
+	if errors.As(err, &code) {
+		os.Exit(int(code))
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "joey:", err)
@@ -98,6 +110,10 @@ func (c *commonFlags) setup(logger *slog.Logger) (config.Config, *session.Manage
 	if err != nil {
 		return cfg, nil, nil, err
 	}
+	// 尽早发现 writable_roots 写错之类的问题，而不是等到第一次提交。
+	if _, err := cfg.SandboxPolicy(ws.Default()); err != nil {
+		return cfg, nil, nil, err
+	}
 
 	var provider llm.Provider
 	switch c.provider {
@@ -136,17 +152,34 @@ func (c *commonFlags) setup(logger *slog.Logger) (config.Config, *session.Manage
 		Provider:   provider,
 		Store:      db,
 		Workspaces: ws,
-		Tools: func(root string) (*tools.Router, error) {
-			w, err := builtin.NewWorkspace(root)
+		Sandbox: func(root string) (*sandbox.Sandbox, error) {
+			p, err := cfg.SandboxPolicy(root)
 			if err != nil {
 				return nil, err
 			}
-			return tools.NewRouter(builtin.Tools(w)...)
+			return sandbox.New(p)
 		},
-		Model:         cfg.Model.Name,
-		MaxSteps:      cfg.Agent.MaxSteps,
-		ContextWindow: cfg.Model.ContextWindow,
-		Logger:        logger,
+		Tools: func(env session.ToolEnv) (*tools.Router, error) {
+			// 文件工具与命令共用会话沙箱的策略，路径守卫是强制的。
+			mode, rules := cfg.SandboxRules()
+			return tools.NewRouter(builtin.Tools(builtin.Env{
+				WS:       builtin.WorkspaceFromGuard(sandbox.NewGuard(env.Sandbox.Policy())),
+				Sandbox:  env.Sandbox,
+				Approval: mode,
+				Rules:    rules,
+			})...)
+		},
+		Instructions:     func(root string) string { return instructions(cfg, root) },
+		ApprovalTimeout:  time.Duration(cfg.Agent.ApprovalTimeoutSeconds) * time.Second,
+		Model:            cfg.Model.Name,
+		MaxSteps:         cfg.Agent.MaxSteps,
+		ContextWindow:    cfg.Model.ContextWindow,
+		AutoCompactLimit: history.AutoCompactLimit(cfg.Model.ContextWindow, cfg.Model.AutoCompactTokenLimit),
+		ToolOutputTokens: cfg.Model.ToolOutputTokens,
+		Logger:           logger,
+
+		PostTurnCompactPercent:   cfg.Model.PostTurnCompactPercent,
+		BackgroundCompactPercent: cfg.Model.BackgroundCompactPercent,
 	})
 	if err != nil {
 		db.Close()
@@ -208,6 +241,9 @@ func runServe(args []string) error {
 	defer stop()
 	errc := make(chan error, 1)
 	go func() { errc <- srv.Serve(ln) }()
+	if cfg.Sandbox.Mode != string(sandbox.FullAccess) && !sandbox.Available() {
+		logger.Warn("macOS Seatbelt is not available; turns will fail until sandbox.mode is danger-full-access", "err", sandbox.ErrUnsupported)
+	}
 	logger.Info("joey listening", "addr", "http://"+ln.Addr().String(), "provider", common.provider, "model", cfg.Model.Name,
 		"db", cfg.Store.Path, "default_workspace", mgr.Workspaces().Default(), "allowed_roots", mgr.Workspaces().Roots())
 	// e2e 测试读取这一行以发现端口。
@@ -224,6 +260,29 @@ func runServe(args []string) error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	return srv.Shutdown(shutdownCtx)
+}
+
+// instructions 为工作目录 root 装配系统提示词：基础指令、环境上下文和
+// 项目指令（deny_read 覆盖的文件不读）。
+func instructions(cfg config.Config, root string) string {
+	mode, _ := cfg.SandboxRules()
+	env := prompt.Env{
+		Workspace: root, Shell: "/bin/sh", SandboxMode: cfg.Sandbox.Mode, Network: cfg.Sandbox.Network,
+		Approval: string(mode), Date: time.Now(),
+	}
+	var docs []prompt.Doc
+	if cfg.Agent.ProjectDocs {
+		var guard *sandbox.Guard
+		if p, err := cfg.SandboxPolicy(root); err == nil {
+			guard = sandbox.NewGuard(p)
+		}
+		for _, d := range prompt.LoadDocs(root, workspace.ExpandHome("~")) {
+			if guard == nil || !guard.Denied(d.Path) {
+				docs = append(docs, d)
+			}
+		}
+	}
+	return prompt.Build(agent.BaseInstructions, env, docs)
 }
 
 func isLoopback(addr string) bool {

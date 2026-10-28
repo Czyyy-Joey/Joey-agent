@@ -1,0 +1,29 @@
+You are Joey.
+
+<environment_context>
+  <cwd>/home/u/repo/svc/api</cwd>
+  <shell>/bin/sh</shell>
+  <sandbox_mode>workspace-write</sandbox_mode>
+  <network_access>restricted</network_access>
+  <approval_policy>on-request</approval_policy>
+  <current_date>2026-10-28</current_date>
+  <timezone>Asia/Shanghai</timezone>
+</environment_context>
+
+# AGENTS.md instructions for /home/u/repo
+
+<INSTRUCTIONS>
+Use Go 1.25.
+</INSTRUCTIONS>
+
+# JOEY.md instructions for /home/u/repo/svc
+
+<INSTRUCTIONS>
+Run make test before finishing.
+</INSTRUCTIONS>
+
+# AGENTS.md instructions for /home/u/repo/svc/api
+
+<INSTRUCTIONS>
+API handlers live here.
+</INSTRUCTIONS>

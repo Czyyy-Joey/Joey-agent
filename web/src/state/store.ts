@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { api, ApiError } from '@/api/client'
 import { subscribe, type ConnectionState } from '@/api/events'
-import type { SessionSummary } from '@/api/types'
+import type { SessionSummary, UserDecision } from '@/api/types'
 import { applyEvent, hydrate, initialState, markInterrupting, type ConversationState } from './reducer'
 
 const STORAGE_KEY = 'joey.sessionId'
@@ -27,6 +27,10 @@ interface Store extends ConversationState {
   /** 原生对话框打开期间为 true。 */
   picking: boolean
   selectSession: (id: string) => Promise<void>
+  /** 删除会话。删的是当前会话时切换到列表里的下一个，没有就新建一个。成功返回 true。 */
+  deleteSession: (id: string) => Promise<boolean>
+  /** 回答一次审批。 */
+  resolveApproval: (approvalId: string, decision: UserDecision) => Promise<void>
   refreshSessions: () => Promise<void>
 }
 
@@ -166,6 +170,43 @@ export const useConversation = create<Store>((set, get) => {
         await attach(id)
       } catch (err) {
         set({ actionError: (err as Error).message })
+      }
+    },
+
+    deleteSession: async (id) => {
+      try {
+        await api.deleteSession(id)
+      } catch (err) {
+        if (!(err instanceof ApiError && err.status === 404)) {
+          const msg = err instanceof ApiError && err.status === 409 ? '这个会话的任务还在运行，请先停止再删除' : (err as Error).message
+          set({ actionError: msg })
+          return false
+        }
+      }
+      const sessions = get().sessions.filter((x) => x.id !== id)
+      set({ sessions, actionError: undefined })
+      if (id === get().sessionId) {
+        unsubscribe?.()
+        unsubscribe = undefined
+        try {
+          await attach(sessions[0]?.id ?? (await api.createSession()).id)
+        } catch (err) {
+          set({ actionError: (err as Error).message })
+        }
+      }
+      await refreshSessions()
+      return true
+    },
+
+    resolveApproval: async (approvalId, decision) => {
+      const id = get().sessionId
+      if (!id) return
+      try {
+        await api.resolveApproval(id, approvalId, decision)
+        set({ actionError: undefined })
+      } catch (err) {
+        // 404：审批已经超时或轮次已结束，approval.resolved 事件会更新界面。
+        if (!(err instanceof ApiError && err.status === 404)) set({ actionError: (err as Error).message })
       }
     },
 

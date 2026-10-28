@@ -1,4 +1,4 @@
-import type { AgentEvent, Item, ItemStatus, SessionInfo, TurnStatus, Usage } from '@/api/types'
+import type { AgentEvent, ApprovalData, Compaction, Item, ItemStatus, SessionInfo, TurnStatus, Usage } from '@/api/types'
 
 // 时间线条目是 UI 渲染的内容。工具调用及其输出在历史中是
 // 单独的条目；这里按调用 id 合并为一个条目。
@@ -17,6 +17,21 @@ export type Entry =
       status: ItemStatus
       isError: boolean
       durationMs?: number
+      /** 文件改动的 unified diff（write_file、apply_patch 成功时）。 */
+      diff?: string
+      /** 运行中收到的实时输出（命令的 stdout/stderr），完成后由 output 取代。 */
+      live?: string
+      /** 这次调用的审批；decision 为空表示仍在等待用户。 */
+      approval?: ApprovalData
+    }
+  | {
+      type: 'compaction'
+      id: string
+      turnId: string
+      status: ItemStatus
+      /** 完成时是摘要，失败时是错误信息，压缩中是已生成的摘要片段。 */
+      text: string
+      info?: Compaction
     }
   | { type: 'notice'; id: string; turnId: string; level: 'warning' | 'error'; text: string }
   | { type: 'turn_end'; id: string; turnId: string; status: TurnStatus; error?: string }
@@ -29,7 +44,16 @@ export interface ConversationState {
   runState: RunState
   activeTurn?: string
   entries: Entry[]
-  usage: { last?: Usage; turn?: Usage; session: Usage; contextWindow?: number }
+  usage: {
+    last?: Usage
+    turn?: Usage
+    session: Usage
+    contextWindow?: number
+    /** 当前上下文大小；压缩后会下降，不同于 last.input_tokens。 */
+    contextTokens?: number
+    estimated?: boolean
+    autoCompactLimit?: number
+  }
 }
 
 const zeroUsage = (): Usage => ({ input_tokens: 0, output_tokens: 0, total_tokens: 0 })
@@ -73,6 +97,7 @@ export function hydrate(info: SessionInfo): ConversationState {
       entries[idx] = {
         ...tool,
         output: it.output.content,
+        diff: it.output.diff,
         isError: !!it.output.is_error,
         status: aborted ? 'aborted' : it.output.is_error ? 'failed' : 'completed',
       }
@@ -100,6 +125,8 @@ function entryFromItem(it: Item): Entry | undefined {
         status: 'completed',
         isError: false,
       }
+    case 'compaction':
+      return { type: 'compaction', id: it.id, turnId: it.turn_id, status: 'completed', text: it.text ?? '', info: it.compaction }
   }
   return undefined
 }
@@ -132,7 +159,16 @@ export function applyEvent(state: ConversationState, ev: AgentEvent): Conversati
       session.total_tokens += ev.data.last.total_tokens
       return {
         ...s,
-        usage: { last: ev.data.last, turn: ev.data.turn, session, contextWindow: ev.data.context_window },
+        usage: {
+          // 压缩和工具执行后的用量事件没有新的请求，last 为零。
+          last: ev.data.last.total_tokens ? ev.data.last : s.usage.last,
+          turn: ev.data.turn,
+          session,
+          contextWindow: ev.data.context_window,
+          contextTokens: ev.data.context_tokens,
+          estimated: ev.data.estimated,
+          autoCompactLimit: ev.data.auto_compact_limit,
+        },
       }
     }
 
@@ -150,8 +186,27 @@ export function applyEvent(state: ConversationState, ev: AgentEvent): Conversati
     case 'item.delta':
     case 'item.completed':
       return { ...s, entries: applyItemEvent(s.entries, ev, turnId) }
+
+    case 'approval.requested':
+    case 'approval.resolved': {
+      const idx = s.entries.findIndex((e) => e.type === 'tool' && (e.id === ev.item_id || e.callId === ev.data.call_id))
+      if (idx < 0) return s
+      const entries = [...s.entries]
+      entries[idx] = { ...(entries[idx] as ToolEntry), approval: ev.data }
+      return { ...s, entries }
+    }
   }
   return s
+}
+
+type ToolEntry = Extract<Entry, { type: 'tool' }>
+
+/** 实时输出最多保留的字符数；完整输出在调用完成时给出。 */
+export const LIVE_OUTPUT_LIMIT = 32_000
+
+/** 返回仍在等待用户决定的审批。 */
+export function pendingApprovals(state: ConversationState): ApprovalData[] {
+  return state.entries.flatMap((e) => (e.type === 'tool' && e.approval && !e.approval.decision ? [e.approval] : []))
 }
 
 type ItemEvent = Extract<AgentEvent, { type: 'item.started' | 'item.delta' | 'item.completed' }>
@@ -179,7 +234,14 @@ function applyItemEvent(entries: Entry[], ev: ItemEvent, turnId: string): Entry[
     }
     case 'tool_call': {
       const prev = existing && existing.type === 'tool' ? existing : undefined
+      if (ev.type === 'item.delta') {
+        if (!prev) return entries
+        const live = (prev.live ?? '') + (d.output ?? '')
+        next = { ...prev, live: live.length > LIVE_OUTPUT_LIMIT ? live.slice(-LIVE_OUTPUT_LIMIT) : live }
+        break
+      }
       next = {
+        ...prev,
         type: 'tool',
         id,
         turnId,
@@ -187,11 +249,20 @@ function applyItemEvent(entries: Entry[], ev: ItemEvent, turnId: string): Entry[
         name: d.name ?? prev?.name ?? '',
         args: d.arguments ?? prev?.args ?? '',
         output: d.output ?? prev?.output,
+        diff: d.diff ?? prev?.diff,
         status: d.status ?? prev?.status ?? 'in_progress',
         isError: d.is_error ?? prev?.isError ?? false,
         // duration_ms 为零时不会出现在 JSON 中。
         durationMs: d.duration_ms ?? (ev.type === 'item.completed' ? 0 : prev?.durationMs),
+        live: ev.type === 'item.completed' ? undefined : prev?.live,
       }
+      break
+    }
+    case 'compaction': {
+      const prev = existing && existing.type === 'compaction' ? existing : undefined
+      const text = ev.type === 'item.delta' ? (prev?.text ?? '') + (d.text ?? '') : (d.text ?? prev?.text ?? '')
+      const status = ev.type === 'item.completed' ? (d.status ?? 'completed') : 'in_progress'
+      next = { type: 'compaction', id, turnId, status, text, info: d.compaction ?? prev?.info }
       break
     }
     default:

@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"github.com/Czyyy-Joey/joey-agent/internal/history"
 	"github.com/Czyyy-Joey/joey-agent/internal/llm"
 	"github.com/Czyyy-Joey/joey-agent/internal/protocol"
+	"github.com/Czyyy-Joey/joey-agent/internal/sandbox"
 	"github.com/Czyyy-Joey/joey-agent/internal/store"
 	"github.com/Czyyy-Joey/joey-agent/internal/tools"
 	"github.com/Czyyy-Joey/joey-agent/internal/workspace"
@@ -33,6 +35,8 @@ var (
 	ErrClosed = errors.New("session: manager closed")
 	// ErrWorkspaceUnavailable 在会话的工作目录已不存在或不再被允许时返回。
 	ErrWorkspaceUnavailable = errors.New("session: workspace is not available")
+	// ErrSandboxUnavailable 在无法为会话创建沙箱时返回（通常是配置问题）。
+	ErrSandboxUnavailable = errors.New("session: sandbox is not available")
 	// errInterrupted 是用户中断触发的取消原因。
 	errInterrupted = errors.New("interrupted by user")
 )
@@ -50,14 +54,37 @@ type Runtime struct {
 	Store *store.DB
 	// Workspaces 决定会话可以选择的工作目录；为 nil 时只允许进程当前目录。
 	Workspaces *workspace.Policy
-	// Tools 为工作目录 root 构建工具路由；为 nil 时会话没有工具。
-	Tools func(root string) (*tools.Router, error)
+	// Sandbox 为会话的工作目录 root 创建执行沙箱，每个会话一个，在第一次
+	// 提交时创建、Manager 关闭时关闭；为 nil 时会话没有沙箱。
+	Sandbox func(root string) (*sandbox.Sandbox, error)
+	// Tools 为一个会话构建工具路由；为 nil 时会话没有工具。
+	Tools func(ToolEnv) (*tools.Router, error)
 	// Instructions 返回 root 下的系统提示词；为 nil 时用 agent.DefaultInstructions。
 	Instructions  func(root string) string
 	Model         string
 	MaxSteps      int
 	ContextWindow int
-	Logger        *slog.Logger
+	// AutoCompactLimit 是自动压缩的阈值（见 history.AutoCompactLimit）；
+	// 0 表示只在模型报告上下文超限后压缩。
+	AutoCompactLimit int
+	// ToolOutputTokens 是单个工具输出写入历史时保留的 token 数；0 表示默认值。
+	ToolOutputTokens int
+	// PostTurnCompactPercent、BackgroundCompactPercent 见 agent.TurnEnv 中的
+	// 同名字段；0 表示关闭。
+	PostTurnCompactPercent   int
+	BackgroundCompactPercent int
+	// ApprovalTimeout 是等待用户审批的时长；0 表示 DefaultApprovalTimeout。
+	ApprovalTimeout time.Duration
+	Logger          *slog.Logger
+}
+
+// ToolEnv 是构建工具时可用的会话资源。
+type ToolEnv struct {
+	SessionID string
+	// Root 是会话的工作目录（已解析）。
+	Root string
+	// Sandbox 可能为 nil（Runtime.Sandbox 未配置时）。
+	Sandbox *sandbox.Sandbox
 }
 
 // TurnInfo 是已结束轮次的摘要。
@@ -101,9 +128,22 @@ type Session struct {
 	mu        sync.Mutex
 	title     string
 	updatedAt time.Time
-	items     []protocol.Item
-	turns     []TurnInfo
-	active    *activeTurn
+	// items 是完整的会话历史，包括压缩检查点；模型历史是 history.Replay(items)。
+	items []protocol.Item
+	// size 是上一轮结束时上游报告的上下文大小，只保存在内存中。
+	size    history.ContextSize
+	turns   []TurnInfo
+	active  *activeTurn
+	sandbox *sandbox.Sandbox
+	// deleted 为 true 表示会话已被删除，之后不能再启动轮次。
+	deleted bool
+	// compactor 是会话的后台压缩器，跨轮次存在；为 nil 时不做后台压缩。
+	compactor *agent.Background
+	// approvals 是正在等待用户决定的审批。
+	approvals map[string]*pendingApproval
+	// allowed 是用户选择"本会话都允许"的操作（ApprovalRequest.Keys），只
+	// 保存在内存中，进程重启后需要重新批准。
+	allowed map[string]bool
 }
 
 type activeTurn struct {
@@ -125,11 +165,26 @@ func (s *Session) Bus() *Bus { return s.bus }
 
 // Submit 为 input 启动一个轮次并返回其 id，不等待其完成。
 func (s *Session) Submit(input string) (string, error) {
+	return s.start(input, false)
+}
+
+// Compact 启动一个只压缩上下文的轮次（/compact），不等待其完成。
+func (s *Session) Compact() (string, error) {
+	return s.start(CompactCommand, true)
+}
+
+// CompactCommand 是手动压缩轮次记录的输入。
+const CompactCommand = "/compact"
+
+func (s *Session) start(input string, compact bool) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	m := s.m
 	if m.ctx.Err() != nil {
 		return "", ErrClosed
+	}
+	if s.deleted {
+		return "", ErrNotFound
 	}
 	if s.active != nil {
 		return "", ErrTurnActive
@@ -139,7 +194,14 @@ func (s *Session) Submit(input string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("%w: %v", ErrWorkspaceUnavailable, err)
 	}
-	router, err := m.router(root)
+	if s.sandbox == nil && m.rt.Sandbox != nil {
+		sb, err := m.rt.Sandbox(root)
+		if err != nil {
+			return "", fmt.Errorf("%w: %v", ErrSandboxUnavailable, err)
+		}
+		s.sandbox = sb
+	}
+	router, err := m.router(ToolEnv{SessionID: s.id, Root: root, Sandbox: s.sandbox})
 	if err != nil {
 		return "", fmt.Errorf("%w: %v", ErrWorkspaceUnavailable, err)
 	}
@@ -167,14 +229,15 @@ func (s *Session) Submit(input string) (string, error) {
 	ctx, cancel := context.WithCancelCause(m.ctx)
 	at := &activeTurn{id: turnID, cancel: cancel, done: make(chan struct{}), startSeq: startSeq}
 	s.active = at
-	hist := append([]protocol.Item(nil), s.items...)
+	hist := slices.Clone(history.Replay(s.items))
+	size := s.size
 	s.publish(protocol.Event{Type: protocol.EventTurnStarted, TurnID: turnID,
 		Data: protocol.TurnData{Status: protocol.TurnRunning, Input: input}})
-	go s.run(ctx, at, router, root, hist, input)
+	go s.run(ctx, at, router, root, hist, size, input, compact)
 	return turnID, nil
 }
 
-func (s *Session) run(ctx context.Context, at *activeTurn, router *tools.Router, root string, hist []protocol.Item, input string) {
+func (s *Session) run(ctx context.Context, at *activeTurn, router *tools.Router, root string, hist []protocol.Item, size history.ContextSize, input string, compact bool) {
 	defer close(at.done)
 	defer at.cancel(nil)
 	m := s.m
@@ -188,8 +251,21 @@ func (s *Session) run(ctx context.Context, at *activeTurn, router *tools.Router,
 		ContextWindow: m.rt.ContextWindow,
 		Emit:          func(e protocol.Event) { s.publish(e) },
 		Record:        func(it protocol.Item) error { return m.db.AppendItem(bg, s.id, it) },
+		Approver:      approver{s},
+
+		AutoCompactLimit:         m.rt.AutoCompactLimit,
+		PostTurnCompactPercent:   m.rt.PostTurnCompactPercent,
+		BackgroundCompactPercent: m.rt.BackgroundCompactPercent,
+		Background:               s.compactor,
+		ToolOutputTokens:         m.rt.ToolOutputTokens,
+		Size:                     size,
 	}
-	res := agent.RunTurn(ctx, env, hist, input)
+	var res agent.TurnResult
+	if compact {
+		res = agent.Compact(ctx, env, hist)
+	} else {
+		res = agent.RunTurn(ctx, env, hist, input)
+	}
 
 	// 补齐写库失败时缺少的工具输出。缺口只可能出现在本轮末尾，所以
 	// 追加到库里的顺序与内存中一致。
@@ -230,9 +306,29 @@ func (s *Session) run(ctx context.Context, at *activeTurn, router *tools.Router,
 	}
 	s.updatedAt = now
 	s.items = append(s.items, items...)
+	s.size = res.Context
 	s.turns = append(s.turns, TurnInfo{ID: at.id, Status: res.Status, Error: data.Error})
 	s.publish(protocol.Event{Type: protocol.EventTurnCompleted, TurnID: at.id, Data: data})
 	s.active = nil
+}
+
+// Sandbox 返回会话的沙箱；尚未提交过任何轮次时为 nil。
+func (s *Session) Sandbox() *sandbox.Sandbox {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sandbox
+}
+
+// closeSandbox 在没有运行中的轮次后关闭沙箱。
+func (s *Session) closeSandbox() error {
+	s.mu.Lock()
+	sb := s.sandbox
+	s.sandbox = nil
+	s.mu.Unlock()
+	if sb == nil {
+		return nil
+	}
+	return sb.Close()
 }
 
 // Interrupt 取消正在运行的轮次，最多等待 timeout 让其停止。

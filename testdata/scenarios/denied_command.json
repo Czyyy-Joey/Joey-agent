@@ -1,0 +1,13 @@
+{
+  "steps": [
+    {
+      "text": "我需要清理构建目录。",
+      "calls": [{"id": "call_rm", "name": "exec_command", "arguments": {"command": "rm -rf ~"}}]
+    },
+    {
+      "text": "你拒绝了这条命令，我改为只删除工作区里的 build 目录。",
+      "calls": [{"id": "call_rm2", "name": "exec_command", "arguments": {"command": "rm -rf ./build && echo cleaned"}}]
+    },
+    {"text": "已清理 ./build。"}
+  ]
+}

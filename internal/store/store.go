@@ -207,6 +207,29 @@ func (s *DB) GetSession(ctx context.Context, id string) (SessionRecord, error) {
 	return r, wrap("get session", err)
 }
 
+// DeleteSession 在一个事务中删除会话及其轮次、历史和事件；会话不存在时
+// 返回 ErrNotFound。
+func (s *DB) DeleteSession(ctx context.Context, id string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return wrap("delete session", err)
+	}
+	defer tx.Rollback()
+	for _, table := range []string{"events", "items", "turns"} {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM `+table+` WHERE session_id = ?`, id); err != nil {
+			return wrap("delete session", err)
+		}
+	}
+	res, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE id = ?`, id)
+	if err != nil {
+		return wrap("delete session", err)
+	}
+	if err := expectOne(res); err != nil {
+		return err
+	}
+	return wrap("delete session", tx.Commit())
+}
+
 // ListSessions 按更新时间倒序返回最多 limit 个会话。
 func (s *DB) ListSessions(ctx context.Context, limit int) ([]SessionRecord, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT `+sessionCols+` FROM sessions ORDER BY updated_at DESC, id LIMIT ?`, limit)

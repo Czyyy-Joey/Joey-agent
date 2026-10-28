@@ -51,7 +51,7 @@ export function Composer({ runState, disabled, onSend, onStop }: Props) {
         value={text}
         onChange={(e) => setText(e.target.value)}
         onKeyDown={onKeyDown}
-        placeholder={busy ? 'Agent 正在执行… 按 Esc 停止' : '让 Joey 读文件、回答问题…（Enter 发送，Shift+Enter 换行）'}
+        placeholder={busy ? 'Agent 正在执行… 按 Esc 停止' : '让 Joey 读文件、改代码…（Enter 发送，Shift+Enter 换行，/compact 压缩上下文）'}
         disabled={disabled}
         className="block max-h-[200px] w-full resize-none bg-transparent px-2 py-1.5 outline-none placeholder:text-muted"
       />

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/Czyyy-Joey/joey-agent/internal/dialog"
+	"github.com/Czyyy-Joey/joey-agent/internal/protocol"
 	"github.com/Czyyy-Joey/joey-agent/internal/session"
 	"github.com/Czyyy-Joey/joey-agent/internal/workspace"
 )
@@ -73,8 +74,10 @@ func New(opts Options) *Server {
 	s.mux.HandleFunc("GET /api/workspace/dirs", s.listDirs)
 	s.mux.HandleFunc("POST /api/workspace/pick", s.pickFolder)
 	s.mux.HandleFunc("GET /api/sessions/{id}", s.getSession)
+	s.mux.HandleFunc("DELETE /api/sessions/{id}", s.deleteSession)
 	s.mux.HandleFunc("POST /api/sessions/{id}/turns", s.submitTurn)
 	s.mux.HandleFunc("POST /api/sessions/{id}/interrupt", s.interrupt)
+	s.mux.HandleFunc("POST /api/sessions/{id}/approvals/{approval}", s.resolveApproval)
 	s.mux.HandleFunc("GET /api/sessions/{id}/events", s.events)
 	if opts.Static != nil {
 		s.mux.Handle("GET /", spaHandler(opts.Static))
@@ -299,6 +302,23 @@ func (s *Server) getSession(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// deleteSession 删除会话。会话正在运行时返回 409，需要先中断。
+func (s *Server) deleteSession(w http.ResponseWriter, r *http.Request) {
+	err := s.opts.Manager.Delete(r.PathValue("id"))
+	switch {
+	case err == nil:
+		w.WriteHeader(http.StatusNoContent)
+	case errors.Is(err, session.ErrNotFound):
+		writeError(w, http.StatusNotFound, "session not found")
+	case errors.Is(err, session.ErrTurnActive):
+		writeError(w, http.StatusConflict, "a turn is running in this session; interrupt it first")
+	case errors.Is(err, session.ErrClosed):
+		writeError(w, http.StatusServiceUnavailable, err.Error())
+	default:
+		s.internalError(w, "delete session", err)
+	}
+}
+
 func (s *Server) submitTurn(w http.ResponseWriter, r *http.Request) {
 	sess, ok := s.lookup(w, r)
 	if !ok {
@@ -314,12 +334,20 @@ func (s *Server) submitTurn(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "text is required")
 		return
 	}
-	turnID, err := sess.Submit(body.Text)
+	// 输入 /compact 时只压缩上下文，和 joey chat 一致。
+	submit := sess.Submit
+	if strings.TrimSpace(body.Text) == session.CompactCommand {
+		submit = func(string) (string, error) { return sess.Compact() }
+	}
+	turnID, err := submit(body.Text)
 	switch {
 	case errors.Is(err, session.ErrTurnActive):
 		writeError(w, http.StatusConflict, "a turn is already running in this session")
 	case errors.Is(err, session.ErrWorkspaceUnavailable):
 		writeError(w, http.StatusConflict, err.Error())
+	case errors.Is(err, session.ErrSandboxUnavailable):
+		s.opts.Logger.Error("create sandbox", "err", err)
+		writeError(w, http.StatusServiceUnavailable, err.Error())
 	case errors.Is(err, session.ErrClosed):
 		writeError(w, http.StatusServiceUnavailable, err.Error())
 	case err != nil:
@@ -336,6 +364,31 @@ func (s *Server) interrupt(w http.ResponseWriter, r *http.Request) {
 	}
 	interrupted := sess.Interrupt(s.opts.InterruptTimeout)
 	writeJSON(w, http.StatusOK, map[string]bool{"interrupted": interrupted})
+}
+
+// resolveApproval 记录用户对一次审批的决定：
+// {"decision": "approved" | "approved_for_session" | "denied" | "abort"}。
+func (s *Server) resolveApproval(w http.ResponseWriter, r *http.Request) {
+	sess, ok := s.lookup(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		Decision protocol.ReviewDecision `json:"decision"`
+	}
+	if !decodeBody(w, r, &body, false) {
+		return
+	}
+	switch err := sess.Resolve(r.PathValue("approval"), body.Decision); {
+	case errors.Is(err, session.ErrInvalidDecision):
+		writeError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, session.ErrApprovalNotFound):
+		writeError(w, http.StatusNotFound, err.Error())
+	case err != nil:
+		s.internalError(w, "resolve approval", err)
+	default:
+		writeJSON(w, http.StatusOK, map[string]string{"decision": string(body.Decision)})
+	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

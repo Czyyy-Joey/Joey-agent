@@ -19,7 +19,7 @@ func newManager(t *testing.T, steps ...llmtest.Step) (*Manager, *llmtest.Scripte
 	if err != nil {
 		t.Fatal(err)
 	}
-	m, err := NewManager(Runtime{Provider: p, Tools: func(string) (*tools.Router, error) { return r, nil }})
+	m, err := NewManager(Runtime{Provider: p, Tools: func(ToolEnv) (*tools.Router, error) { return r, nil }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -233,5 +233,50 @@ func TestWait(t *testing.T) {
 	}
 	if s.Info().Status != "idle" {
 		t.Error("still running after Wait")
+	}
+}
+
+func TestDeleteSession(t *testing.T) {
+	m, _ := newManager(t, llmtest.Step{Text: "answer"}, llmtest.Step{Text: "working", Hang: true})
+	s, _ := m.Create("")
+	_, sub, _ := s.Bus().Subscribe(0)
+	id, _ := s.Submit("first")
+	waitTurn(t, sub, id)
+
+	// 运行中的会话不能删除。
+	id, err := s.Submit("long")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for e := range sub.C {
+		if e.Type == protocol.EventItemDelta {
+			break
+		}
+	}
+	if err := m.Delete(s.ID()); !errors.Is(err, ErrTurnActive) {
+		t.Fatalf("delete running = %v", err)
+	}
+	s.Interrupt(2 * time.Second)
+	waitTurn(t, sub, id)
+
+	if err := m.Delete(s.ID()); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := <-sub.C; ok {
+		// 订阅里可能还有缓冲的事件，读完后应当关闭。
+		for range sub.C {
+		}
+	}
+	if _, err := m.Get(s.ID()); !errors.Is(err, ErrNotFound) {
+		t.Errorf("get after delete = %v", err)
+	}
+	if _, err := s.Submit("again"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("submit on a deleted session = %v", err)
+	}
+	if list, _ := m.List(10); len(list) != 0 {
+		t.Errorf("list = %+v", list)
+	}
+	if err := m.Delete(s.ID()); !errors.Is(err, ErrNotFound) {
+		t.Errorf("second delete = %v", err)
 	}
 }

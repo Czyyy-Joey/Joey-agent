@@ -1,0 +1,105 @@
+{
+  "steps": [
+    {
+      "text": "先读模块 A。",
+      "chunk": 8,
+      "delay": "10ms",
+      "calls": [
+        {
+          "id": "call_long_1",
+          "name": "read_file",
+          "arguments": {
+            "path": "a.md"
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 2400,
+        "output_tokens": 60,
+        "total_tokens": 2460
+      }
+    },
+    {
+      "text": "接着读模块 B。",
+      "chunk": 8,
+      "delay": "10ms",
+      "calls": [
+        {
+          "id": "call_long_2",
+          "name": "read_file",
+          "arguments": {
+            "path": "b.md"
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 4600,
+        "output_tokens": 60,
+        "total_tokens": 4660
+      }
+    },
+    {
+      "text": "再读模块 C。",
+      "chunk": 8,
+      "delay": "10ms",
+      "calls": [
+        {
+          "id": "call_long_3",
+          "name": "read_file",
+          "arguments": {
+            "path": "c.md"
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 6600,
+        "output_tokens": 60,
+        "total_tokens": 6660
+      }
+    },
+    {
+      "text": "## 交接摘要\n- 用户目标：通读 a.md、b.md、c.md、d.md 四个模块文档，最后用一句话复述目标并列出每个模块的主题。\n- 已完成：读完 a.md（配置加载）、b.md（会话管理）、c.md（沙箱执行）。\n- 下一步：读 d.md，然后给出最终回答。",
+      "chunk": 12,
+      "delay": "10ms",
+      "usage": {
+        "input_tokens": 7300,
+        "output_tokens": 120,
+        "total_tokens": 7420
+      }
+    },
+    {
+      "text": "根据摘要继续，读最后一个模块 D。",
+      "chunk": 8,
+      "delay": "10ms",
+      "calls": [
+        {
+          "id": "call_long_4",
+          "name": "read_file",
+          "arguments": {
+            "path": "d.md"
+          }
+        }
+      ],
+      "usage": {
+        "input_tokens": 2600,
+        "output_tokens": 60,
+        "total_tokens": 2660
+      }
+    },
+    {
+      "text": "原始目标是：通读四个模块文档并汇总主题。\n\n- A：配置加载\n- B：会话管理\n- C：沙箱执行\n- D：上下文压缩",
+      "chunk": 6,
+      "delay": "10ms",
+      "usage": {
+        "input_tokens": 4400,
+        "output_tokens": 80,
+        "total_tokens": 4480
+      }
+    },
+    {
+      "text": "## 交接摘要（手动）\n- 用户目标：通读四个模块文档并汇总主题。\n- 已完成：四个模块都已读完并给出回答：A 配置加载、B 会话管理、C 沙箱执行、D 上下文压缩。",
+      "chunk": 12,
+      "delay": "10ms"
+    }
+  ]
+}

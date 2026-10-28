@@ -15,7 +15,7 @@ func TestToMessages(t *testing.T) {
 		{Kind: protocol.ItemAgentMessage, Text: "Let me look."},
 		{Kind: protocol.ItemToolCall, Call: &protocol.ToolCall{CallID: "c1", Name: "read_file", Arguments: `{"path":"a"}`}},
 		{Kind: protocol.ItemToolCall, Call: &protocol.ToolCall{CallID: "c2", Name: "read_file", Arguments: `{"path":"b"}`}},
-		{Kind: protocol.ItemToolOutput, Output: &protocol.ToolOutput{CallID: "c1", Content: "A"}},
+		{Kind: protocol.ItemToolOutput, Output: &protocol.ToolOutput{CallID: "c1", Content: "A", Diff: "--- a/a\n+++ b/a\n"}},
 		{Kind: protocol.ItemToolOutput, Output: &protocol.ToolOutput{CallID: "c2", Content: "B", IsError: true}},
 		{Kind: protocol.ItemAgentMessage, Text: "Done."},
 		{Kind: protocol.ItemTurnAborted, Text: "[turn aborted]"},

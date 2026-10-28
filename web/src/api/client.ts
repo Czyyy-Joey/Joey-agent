@@ -1,4 +1,4 @@
-import type { DirListing, SessionInfo, SessionSummary } from './types'
+import type { DirListing, SessionInfo, SessionSummary, UserDecision } from './types'
 
 export class ApiError extends Error {
   constructor(
@@ -15,7 +15,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
     body: body === undefined ? undefined : JSON.stringify(body),
   })
-  const data = await res.json().catch(() => ({}))
+  const data = res.status === 204 ? {} : await res.json().catch(() => ({}))
   if (!res.ok) {
     throw new ApiError(res.status, (data as { error?: string }).error ?? res.statusText)
   }
@@ -31,9 +31,17 @@ export const api = {
   pickFolder: (start?: string) =>
     request<{ path?: string; cancelled?: boolean }>('POST', '/api/workspace/pick', start ? { start } : {}),
   getSession: (id: string) => request<SessionInfo>('GET', `/api/sessions/${encodeURIComponent(id)}`),
+  /** 删除会话及其全部历史；会话正在运行时返回 409。 */
+  deleteSession: (id: string) => request<Record<string, never>>('DELETE', `/api/sessions/${encodeURIComponent(id)}`),
   submitTurn: (id: string, text: string) =>
     request<{ turn_id: string }>('POST', `/api/sessions/${encodeURIComponent(id)}/turns`, { text }),
   interrupt: (id: string) =>
     request<{ interrupted: boolean }>('POST', `/api/sessions/${encodeURIComponent(id)}/interrupt`),
+  resolveApproval: (id: string, approvalId: string, decision: UserDecision) =>
+    request<{ decision: string }>(
+      'POST',
+      `/api/sessions/${encodeURIComponent(id)}/approvals/${encodeURIComponent(approvalId)}`,
+      { decision },
+    ),
   eventsURL: (id: string, after: number) => `/api/sessions/${encodeURIComponent(id)}/events?after=${after}`,
 }

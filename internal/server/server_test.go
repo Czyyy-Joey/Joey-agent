@@ -33,6 +33,12 @@ type fixture struct {
 
 func newFixture(t *testing.T, opts Options, steps ...llmtest.Step) *fixture {
 	t.Helper()
+	return newFixtureWithTools(t, opts, nil, steps...)
+}
+
+// newFixtureWithTools 和 newFixture 相同，但会话使用 ts 中的工具。
+func newFixtureWithTools(t *testing.T, opts Options, ts []tools.Tool, steps ...llmtest.Step) *fixture {
+	t.Helper()
 	ws, err := workspace.NewPolicy(t.TempDir(), []string{t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
@@ -40,7 +46,7 @@ func newFixture(t *testing.T, opts Options, steps ...llmtest.Step) *fixture {
 	mgr, err := session.NewManager(session.Runtime{
 		Provider:   llmtest.NewScripted(steps...),
 		Workspaces: ws,
-		Tools:      func(string) (*tools.Router, error) { return tools.NewRouter() },
+		Tools:      func(session.ToolEnv) (*tools.Router, error) { return tools.NewRouter(ts...) },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -188,6 +194,35 @@ func TestTurnOverSSE(t *testing.T) {
 	_, info := f.do(t, "GET", "/api/sessions/"+id, "")
 	if info["status"] != "idle" || len(info["items"].([]any)) != 2 {
 		t.Errorf("info = %v", info)
+	}
+}
+
+// TestCompactCommand：发送 "/compact" 时启动压缩轮次，而不是把它当作输入发给模型。
+func TestCompactCommand(t *testing.T) {
+	f := newFixture(t, Options{}, llmtest.Step{Text: "first answer"}, llmtest.Step{Text: "the summary"})
+	id := f.createSession(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	resp, r := openSSE(t, ctx, f.srv.URL+"/api/sessions/"+id+"/events")
+	defer resp.Body.Close()
+	f.do(t, "POST", "/api/sessions/"+id+"/turns", `{"text":"goal"}`)
+	readUntilTurnDone(t, r)
+	if resp, _ := f.do(t, "POST", "/api/sessions/"+id+"/turns", `{"text":" /compact "}`); resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("compact: %d", resp.StatusCode)
+	}
+	var compaction map[string]any
+	for _, e := range readUntilTurnDone(t, r) {
+		if d, ok := e.Data.(map[string]any); ok && e.Type == protocol.EventItemCompleted && d["kind"] == "compaction" {
+			compaction = d
+		}
+	}
+	if compaction == nil || compaction["status"] != "completed" || compaction["text"] != "the summary" {
+		t.Fatalf("compaction = %v", compaction)
+	}
+	_, info := f.do(t, "GET", "/api/sessions/"+id, "")
+	items := info["items"].([]any)
+	if last := items[len(items)-1].(map[string]any); last["kind"] != "compaction" || len(items) != 3 {
+		t.Errorf("items = %v", items)
 	}
 }
 
@@ -478,3 +513,103 @@ func TestPickFolder(t *testing.T) {
 }
 
 var errBlock = errors.New("block")
+
+// approvalTool 请求批准后返回 "approved"。
+type approvalTool struct{}
+
+func (approvalTool) Spec() tools.Spec { return tools.Spec{Name: "needs_ok", Timeout: tools.NoTimeout} }
+func (approvalTool) Handle(ctx context.Context, inv tools.Invocation) (tools.Result, error) {
+	req := tools.ApprovalRequest{Data: protocol.ApprovalData{Kind: protocol.ApprovalExec, Command: "make deploy", Reason: "test"}}
+	if err := inv.RequireApproval(ctx, req); err != nil {
+		return tools.Result{}, err
+	}
+	return tools.Result{Content: "approved"}, nil
+}
+
+func TestApprovalEndpoint(t *testing.T) {
+	f := newFixtureWithTools(t, Options{}, []tools.Tool{approvalTool{}},
+		llmtest.Step{Calls: []llmtest.StepCall{{ID: "c1", Name: "needs_ok"}}},
+		llmtest.Step{Text: "done"},
+	)
+	id := f.createSession(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	_, r := openSSE(t, ctx, f.srv.URL+"/api/sessions/"+id+"/events?after=0")
+	if resp, _ := f.do(t, "POST", "/api/sessions/"+id+"/turns", `{"text":"x"}`); resp.StatusCode != http.StatusAccepted {
+		t.Fatal(resp.Status)
+	}
+	var req protocol.ApprovalData
+	for req.ApprovalID == "" {
+		ev, err := r.next()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ev.data == "" {
+			continue
+		}
+		var e struct {
+			Type protocol.EventType
+			Data protocol.ApprovalData
+		}
+		if err := json.Unmarshal([]byte(ev.data), &e); err != nil {
+			t.Fatal(err)
+		}
+		if e.Type == protocol.EventApprovalRequested {
+			req = e.Data
+		}
+	}
+	if req.Command != "make deploy" || req.CallID != "c1" || req.Tool != "needs_ok" {
+		t.Errorf("request = %+v", req)
+	}
+	path := "/api/sessions/" + id + "/approvals/" + req.ApprovalID
+	if resp, _ := f.do(t, "POST", path, `{"decision":"maybe"}`); resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("bad decision = %d", resp.StatusCode)
+	}
+	if resp, _ := f.do(t, "POST", "/api/sessions/"+id+"/approvals/appr_nope", `{"decision":"approved"}`); resp.StatusCode != http.StatusNotFound {
+		t.Errorf("unknown approval = %d", resp.StatusCode)
+	}
+	if resp, body := f.do(t, "POST", path, `{"decision":"approved"}`); resp.StatusCode != http.StatusOK {
+		t.Fatalf("approve = %d %v", resp.StatusCode, body)
+	}
+	if resp, _ := f.do(t, "POST", path, `{"decision":"approved"}`); resp.StatusCode != http.StatusNotFound {
+		t.Errorf("second answer = %d", resp.StatusCode)
+	}
+	evs := readUntilTurnDone(t, r)
+	var resolved, output string
+	for _, e := range evs {
+		b, _ := json.Marshal(e.Data)
+		switch {
+		case e.Type == protocol.EventApprovalResolved:
+			resolved = string(b)
+		case e.Type == protocol.EventItemCompleted && strings.Contains(string(b), `"tool_call"`):
+			output = string(b)
+		}
+	}
+	if !strings.Contains(resolved, `"decision":"approved"`) || !strings.Contains(output, `"output":"approved"`) {
+		t.Errorf("resolved=%s output=%s", resolved, output)
+	}
+}
+
+func TestDeleteSessionEndpoint(t *testing.T) {
+	f := newFixture(t, Options{}, llmtest.Step{Hang: true})
+	id := f.createSession(t)
+	if resp, _ := f.do(t, "POST", "/api/sessions/"+id+"/turns", `{"text":"x"}`); resp.StatusCode != http.StatusAccepted {
+		t.Fatal(resp.Status)
+	}
+	if resp, body := f.do(t, "DELETE", "/api/sessions/"+id, ""); resp.StatusCode != http.StatusConflict {
+		t.Errorf("delete running = %d %v", resp.StatusCode, body)
+	}
+	f.do(t, "POST", "/api/sessions/"+id+"/interrupt", "")
+	if resp, _ := f.do(t, "DELETE", "/api/sessions/"+id, ""); resp.StatusCode != http.StatusNoContent {
+		t.Errorf("delete = %d", resp.StatusCode)
+	}
+	if resp, _ := f.do(t, "GET", "/api/sessions/"+id, ""); resp.StatusCode != http.StatusNotFound {
+		t.Errorf("get after delete = %d", resp.StatusCode)
+	}
+	if resp, _ := f.do(t, "DELETE", "/api/sessions/"+id, ""); resp.StatusCode != http.StatusNotFound {
+		t.Errorf("second delete = %d", resp.StatusCode)
+	}
+	if _, body := f.do(t, "GET", "/api/sessions", ""); len(body["sessions"].([]any)) != 0 {
+		t.Errorf("list = %v", body)
+	}
+}

@@ -173,6 +173,14 @@ func (m *Manager) Get(id string) (*Session, error) {
 	return s, nil
 }
 
+// newCompactor 返回会话的后台压缩器；没有开启后台压缩时返回 nil。
+func (m *Manager) newCompactor() *agent.Background {
+	if m.rt.BackgroundCompactPercent <= 0 || m.rt.AutoCompactLimit <= 0 {
+		return nil
+	}
+	return agent.NewBackground(m.ctx, m.rt.Provider)
+}
+
 func (m *Manager) newSession(rec store.SessionRecord, items []protocol.Item, turns []TurnInfo, lastSeq int64) *Session {
 	return &Session{
 		id:        rec.ID,
@@ -184,7 +192,57 @@ func (m *Manager) newSession(rec store.SessionRecord, items []protocol.Item, tur
 		updatedAt: rec.UpdatedAt,
 		items:     items,
 		turns:     turns,
+		approvals: make(map[string]*pendingApproval),
+		allowed:   make(map[string]bool),
+		compactor: m.newCompactor(),
 	}
+}
+
+// Delete 删除会话及其全部数据（历史、轮次、事件）。会话有运行中的轮次时
+// 返回 ErrTurnActive，调用方应先中断；会话不存在时返回 ErrNotFound。
+// 删除后会话的事件订阅被关闭，沙箱和后台压缩器被释放。工作目录里的文件
+// 不受影响。
+func (m *Manager) Delete(id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.ctx.Err() != nil {
+		return ErrClosed
+	}
+	s := m.sessions[id]
+	if s != nil {
+		s.mu.Lock()
+		if s.active != nil {
+			s.mu.Unlock()
+			return ErrTurnActive
+		}
+		// 在持有 s.mu 时标记，之后的 Submit 一定看得到，不会和删除交错。
+		s.deleted = true
+		s.mu.Unlock()
+	}
+	err := m.db.DeleteSession(context.Background(), id)
+	if err != nil {
+		if s != nil {
+			s.mu.Lock()
+			s.deleted = false
+			s.mu.Unlock()
+		}
+		if errors.Is(err, store.ErrNotFound) {
+			return ErrNotFound
+		}
+		return err
+	}
+	if s == nil {
+		return nil
+	}
+	delete(m.sessions, id)
+	if s.compactor != nil {
+		s.compactor.Close()
+	}
+	if err := s.closeSandbox(); err != nil {
+		m.logger.Error("close sandbox", "session", id, "err", err)
+	}
+	s.bus.Close()
+	return nil
 }
 
 // List 按最近更新时间返回最多 limit 个会话。
@@ -210,11 +268,11 @@ func (m *Manager) List(limit int) ([]Summary, error) {
 	return out, nil
 }
 
-func (m *Manager) router(root string) (*tools.Router, error) {
+func (m *Manager) router(env ToolEnv) (*tools.Router, error) {
 	if m.rt.Tools == nil {
 		return tools.NewRouter()
 	}
-	return m.rt.Tools(root)
+	return m.rt.Tools(env)
 }
 
 func (m *Manager) instructions(root string) string {
@@ -238,7 +296,17 @@ func (m *Manager) Close(timeout time.Duration) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	for _, s := range sessions {
-		_ = s.Wait(ctx)
+		if s.Wait(ctx) == nil {
+			// 仍在运行的轮次可能还在用沙箱，这种情况下不关闭；命令的进程组
+			// 会随轮次的 ctx 取消被杀掉。
+			if err := s.closeSandbox(); err != nil {
+				m.logger.Error("close sandbox", "session", s.id, "err", err)
+			}
+		}
+		if s.compactor != nil {
+			// m.cancel 已经取消了进行中的后台请求，这里等它退出。
+			s.compactor.Close()
+		}
 		s.bus.Close()
 	}
 	if m.ownsDB {

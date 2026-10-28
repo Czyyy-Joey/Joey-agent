@@ -15,6 +15,7 @@ import (
 	"github.com/Czyyy-Joey/joey-agent/internal/history"
 	"github.com/Czyyy-Joey/joey-agent/internal/llm/llmtest"
 	"github.com/Czyyy-Joey/joey-agent/internal/protocol"
+	"github.com/Czyyy-Joey/joey-agent/internal/sandbox"
 	"github.com/Czyyy-Joey/joey-agent/internal/store"
 	"github.com/Czyyy-Joey/joey-agent/internal/tools"
 	"github.com/Czyyy-Joey/joey-agent/internal/workspace"
@@ -63,7 +64,7 @@ func (e env) open(t *testing.T, p *llmtest.Scripted) *Manager {
 		Provider:   p,
 		Store:      db,
 		Workspaces: e.ws,
-		Tools:      func(root string) (*tools.Router, error) { return tools.NewRouter(rootTool{root}) },
+		Tools:      func(e ToolEnv) (*tools.Router, error) { return tools.NewRouter(rootTool{e.Root}) },
 	})
 	if err != nil {
 		db.Close()
@@ -301,5 +302,68 @@ func TestMakeTitle(t *testing.T) {
 		if got := makeTitle(in); got != want {
 			t.Errorf("makeTitle(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestSandboxLifecycle(t *testing.T) {
+	e := newEnv(t)
+	db, err := store.Open(e.dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	created := 0
+	var seenRoot string
+	var seenSandbox *sandbox.Sandbox
+	m, err := NewManager(Runtime{
+		Provider:   llmtest.NewScripted(llmtest.Step{Text: "a"}, llmtest.Step{Text: "b"}),
+		Store:      db,
+		Workspaces: e.ws,
+		Sandbox: func(root string) (*sandbox.Sandbox, error) {
+			created++
+			p, err := sandbox.NewPolicy(sandbox.FullAccess, root, sandbox.PolicyOptions{})
+			if err != nil {
+				return nil, err
+			}
+			return sandbox.New(p)
+		},
+		Tools: func(env ToolEnv) (*tools.Router, error) {
+			seenRoot, seenSandbox = env.Root, env.Sandbox
+			return tools.NewRouter()
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, _ := m.Create("")
+	if s.Sandbox() != nil {
+		t.Error("sandbox created before the first turn")
+	}
+	runTurn(t, s, "one")
+	runTurn(t, s, "two")
+	if created != 1 || s.Sandbox() == nil || seenSandbox != s.Sandbox() || seenRoot != e.ws.Default() {
+		t.Errorf("created=%d sandbox=%v root=%s", created, s.Sandbox(), seenRoot)
+	}
+	sb := s.Sandbox()
+	m.Close(time.Second)
+	if _, err := sb.Exec(context.Background(), sandbox.ExecRequest{Command: "true"}, nil); !errors.Is(err, sandbox.ErrClosed) {
+		t.Errorf("exec after close = %v", err)
+	}
+
+	// 沙箱创建失败时提交被拒绝，不留下 running 轮次。
+	m2, err := NewManager(Runtime{
+		Provider: llmtest.NewScripted(), Store: db, Workspaces: e.ws,
+		Sandbox: func(string) (*sandbox.Sandbox, error) { return nil, sandbox.ErrUnsupported },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m2.Close(time.Second)
+	s2, _ := m2.Create("")
+	if _, err := s2.Submit("x"); !errors.Is(err, ErrSandboxUnavailable) {
+		t.Errorf("submit = %v", err)
+	}
+	if running, _ := db.RunningTurns(context.Background()); len(running) != 0 {
+		t.Errorf("running turns = %+v", running)
 	}
 }
